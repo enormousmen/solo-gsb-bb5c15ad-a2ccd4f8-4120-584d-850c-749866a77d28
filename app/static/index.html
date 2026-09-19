@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>公交刷卡票价核验台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🚌 公交刷卡票价核验台</h1>
+    <div class="top-actions">
+      <button id="btn-demo" class="btn btn-ghost" type="button">载入演示数据</button>
+      <button id="btn-verify-top" class="btn btn-primary" type="button">▶ 运行核验</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="toast" class="toast" hidden></div>
+
+    <!-- 规则参数 -->
+    <section class="card" id="sec-config">
+      <h2>1. 规则参数</h2>
+      <div class="form-grid">
+        <label>运营日分界时刻（点）
+          <input type="number" id="cfg-split" min="0" max="23" />
+        </label>
+        <label>换乘有效间隔（分钟）
+          <input type="number" id="cfg-minutes" min="1" />
+        </label>
+        <label>换乘抵扣额（元）
+          <input type="number" id="cfg-discount" min="0" step="0.01" />
+        </label>
+        <label>每卡每日封顶额（元）
+          <input type="number" id="cfg-cap" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-config" type="button">保存参数</button>
+        <span class="hint">行程按「进站时刻」归属运营日，如 03:30 的进站归入前一日。</span>
+      </div>
+    </section>
+
+    <!-- 规则试算对比 -->
+    <section class="card" id="sec-trial">
+      <h2>2. 规则试算对比</h2>
+      <p class="hint">输入一组<strong>不会被保存</strong>的草案参数，系统对当前已保存的同一批刷卡记录，
+        分别按「当前配置」与「草案配置」计费。试算与正式核验共用同一套解析、配对与计价规则，
+        <strong>不修改配置、不写入账单</strong>；任一方案存在数据错误时，返回该方案的原有定位错误。</p>
+      <div class="form-grid">
+        <label>草案：运营日分界时刻（点）
+          <input type="number" id="trial-split" min="0" max="23" />
+        </label>
+        <label>草案：换乘有效间隔（分钟）
+          <input type="number" id="trial-minutes" min="1" />
+        </label>
+        <label>草案：换乘抵扣额（元）
+          <input type="number" id="trial-discount" min="0" step="0.01" />
+        </label>
+        <label>草案：每卡每日封顶额（元）
+          <input type="number" id="trial-cap" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-run-trial" type="button">🧪 当前配置 vs 草案 试算</button>
+        <button class="btn btn-ghost" id="btn-trial-copy" type="button">用已保存参数填入草案</button>
+        <span id="trial-status" class="status"></span>
+      </div>
+
+      <div id="trial-errors" class="errors-panel" hidden>
+        <h3>❌ 试算未通过 —— 对应方案的原有定位错误如下（配置未改动、账单未写入）</h3>
+        <div id="trial-err-current" class="trial-err-block" hidden>
+          <h4>当前配置方案</h4>
+          <ul></ul>
+        </div>
+        <div id="trial-err-draft" class="trial-err-block" hidden>
+          <h4>草案配置方案</h4>
+          <ul></ul>
+        </div>
+      </div>
+
+      <div id="trial-result" class="trial-result" hidden>
+        <h3>试算对比 <span class="hint">（差额 = 草案 − 当前，正数红色表示多付）</span></h3>
+        <div id="trial-params" class="trial-params"></div>
+        <div id="trial-batch" class="trial-batch"></div>
+        <div class="table-wrap">
+          <table id="trial-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>#</th><th>行程</th>
+                <th>运营日(当前)</th><th>运营日(草案)</th>
+                <th>优惠(当前)</th><th>优惠(草案)</th><th>优惠差额</th>
+                <th>实扣(当前)</th><th>实扣(草案)</th><th>实扣差额</th>
+                <th>草案优惠说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h3>按卡汇总</h3>
+        <div class="table-wrap">
+          <table id="trial-cards-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>行程数</th>
+                <th>实扣合计(当前)</th><th>实扣合计(草案)</th><th>实扣差额</th>
+                <th>优惠合计(当前)</th><th>优惠合计(草案)</th><th>优惠差额</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 站点分区 -->
+    <section class="card" id="sec-stations">
+      <h2>3. 站点分区</h2>
+      <p class="hint">每行一条：<code>站点名, 分区号</code>，例如 <code>科技园, 1</code></p>
+      <textarea id="stations-text" rows="6" placeholder="科技园, 1
+中心公园, 2
+大学城, 3"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-stations" type="button">保存站点</button>
+        <button class="btn btn-ghost" id="btn-load-stations" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="stations-table">
+          <thead><tr><th>站点</th><th>分区</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 票价矩阵 -->
+    <section class="card" id="sec-fares">
+      <h2>4. 票价矩阵</h2>
+      <p class="hint">每行一条：<code>起始分区, 到达分区, 票价</code>，按行程方向精确匹配。</p>
+      <div class="row-actions compact">
+        <button class="btn btn-ghost" id="btn-gen-fares" type="button">生成对称矩阵模板（分区数）</button>
+        <input type="number" id="fare-zones" min="1" max="20" value="3" class="mini-input" />
+      </div>
+      <textarea id="fares-text" rows="7" placeholder="1, 1, 2.00
+1, 2, 3.00"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-fares" type="button">保存票价矩阵</button>
+        <button class="btn btn-ghost" id="btn-load-fares" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="fares-table">
+          <thead><tr><th>起始分区</th><th>到达分区</th><th>票价（元）</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 刷卡记录 -->
+    <section class="card" id="sec-records">
+      <h2>5. 刷卡记录</h2>
+      <p class="hint">每行一条：<code>卡号, 时刻, 站点, 进/出</code>。方向支持 <code>IN/进</code> 与 <code>OUT/出</code>。
+        时刻示例 <code>2026-09-18 08:00:00</code>，也支持 <code>2026/09/18 08:00</code>。</p>
+      <textarea id="records-text" rows="9" placeholder="A001, 2026-09-18 08:00:00, 科技园, 进
+A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-records" type="button">保存记录</button>
+        <button class="btn btn-ghost" id="btn-load-records" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="records-table">
+          <thead><tr><th>卡号</th><th>时刻</th><th>站点</th><th>方向</th><th>来源行</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 配对修复预览 -->
+    <section class="card" id="sec-repair">
+      <h2>6. 配对修复预览</h2>
+      <p class="hint">针对<strong>已保存</strong>的刷卡记录，仅处理缺失进站、缺失出站与连续同向刷卡：
+        按卡号和时间排序后做全局最小编辑搜索，编辑仅限<strong>翻转进/出方向</strong>或<strong>删除记录</strong>，
+        原始时刻与站点不会被改写。存在多个同成本方案时按稳定顺序最多展示 5 个并标明未展示数量，
+        系统不会替您选定。预览<strong>全程只读</strong>：不保存记录、不清空账单；
+        未知站点、缺票价等非配对错误仍按原错误返回。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-repair" type="button">🛠 生成修复预览</button>
+        <span id="repair-status" class="status"></span>
+      </div>
+
+      <div id="repair-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成修复方案 —— 存在非配对错误，请先在下方核验区处理（记录与账单均未改动）</h3>
+        <ul id="repair-errors-list"></ul>
+      </div>
+
+      <div id="repair-result" class="repair-result" hidden>
+        <div id="repair-summary" class="repair-summary"></div>
+        <div id="repair-plans"></div>
+      </div>
+    </section>
+
+    <!-- 核验结果 -->
+    <section class="card" id="sec-result">
+      <h2>7. 核验结果</h2>
+      <div class="row-actions">
+        <button class="btn btn-primary big" id="btn-verify" type="button">▶ 运行核验</button>
+        <span id="verify-status" class="status"></span>
+      </div>
+
+      <div id="errors-panel" class="errors-panel" hidden>
+        <h3>❌ 核验未通过 —— 已定位以下问题，本次未生成任何账单（无部分账单）</h3>
+        <ul id="errors-list"></ul>
+      </div>
+
+      <div id="bills-panel" class="bills-panel" hidden>
+        <h3>✅ 行程账单</h3>
+        <div class="table-wrap">
+          <table id="bills-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>#</th><th>运营日</th>
+                <th>进站时刻</th><th>出站时刻</th>
+                <th>进站(区)</th><th>出站(区)</th>
+                <th>基础票价</th><th>优惠</th><th>实扣</th>
+                <th>当日累计</th><th>优惠来源/说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
+      <a href="/docs" target="_blank">API 文档</a>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
