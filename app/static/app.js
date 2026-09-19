@@ -454,7 +454,8 @@ function renderRepairPlans(data) {
     btn.className = "btn btn-ghost";
     btn.type = "button";
     btn.textContent = "📋 复制修复后记录";
-    btn.addEventListener("click", () => copyText(p.fixed_text));
+    btn.addEventListener("click", () =>
+      copyText(p.fixed_text, "已复制修复后的记录文本（仍未保存，可粘贴到记录区核对）"));
     head.appendChild(btn);
     div.appendChild(head);
 
@@ -476,7 +477,7 @@ function renderRepairPlans(data) {
   });
 }
 
-async function copyText(text) {
+async function copyText(text, message) {
   try {
     if (navigator.clipboard) {
       await navigator.clipboard.writeText(text);
@@ -490,7 +491,7 @@ async function copyText(text) {
       document.execCommand("copy");
       document.body.removeChild(ta);
     }
-    toast("已复制修复后的记录文本（仍未保存，可粘贴到记录区核对）");
+    toast(message || "已复制到剪贴板（仍未保存任何改动）");
   } catch (_) {
     toast("复制失败，请手动选中文本复制", false);
   }
@@ -527,6 +528,165 @@ async function runRepairPreview() {
     status.className = "status bad";
     toast("无法生成修复预览", false);
   }
+}
+
+/* ---------------- 8. 票价矩阵路径审计（只读） ---------------- */
+
+let lastSuggestLines = [];
+
+function renderAuditErrors(errors) {
+  const ul = $("audit-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("audit-errors").hidden = false;
+  $("audit-result").hidden = true;
+}
+
+function affectedCellHtml(list) {
+  return list.map((a) =>
+    `<div>${escapeHtml(a.card)} 第${a.seq}程` +
+    `<span class="sub">（进站第 ${a.entry_line} 行 / 出站第 ${a.exit_line} 行）</span>` +
+    `<div class="sub">${a.entry_time} ${escapeHtml(a.entry_station)} → ` +
+    `${escapeHtml(a.exit_station)}</div></div>`
+  ).join("");
+}
+
+function pathCellHtml(item) {
+  const legs = (item.legs || []).map((l) =>
+    `${l.from_zone}→${l.to_zone} ${yuan(l.price)}`).join(" ＋ ");
+  return `<div class="path-text">${escapeHtml(item.path_text)}</div>` +
+    (legs ? `<div class="sub">${escapeHtml(legs)}</div>` : "");
+}
+
+function renderFareAudit(data) {
+  $("audit-errors").hidden = true;
+  $("audit-result").hidden = false;
+
+  const miss = data.missing || [];
+  const over = data.overpriced || [];
+  const unreachable = miss.filter((m) => !m.reachable).length;
+  const reachable = miss.length - unreachable;
+
+  const summary = $("audit-summary");
+  if (!miss.length && !over.length) {
+    summary.innerHTML =
+      `✅ 共审计 <strong>${data.trip_count}</strong> 笔行程 / ` +
+      `<strong>${data.pair_count}</strong> 个实际行程分区对：均有直达票价，` +
+      `且直达票价不高于任何间接路径。<br>` +
+      `<span class="sub">审计全程只读：未修改票价矩阵，未写入或清空账单。</span>`;
+  } else {
+    summary.innerHTML =
+      `共审计 <strong>${data.trip_count}</strong> 笔行程 / ` +
+      `<strong>${data.pair_count}</strong> 个实际行程分区对：` +
+      `缺直达票价 <strong>${miss.length}</strong> 对` +
+      `（可达可补录 ${reachable} 对，不可达保留 MISSING_FARE ${unreachable} 对），` +
+      `直达票价高于间接路径 <strong>${over.length}</strong> 对。<br>` +
+      `<span class="sub">审计全程只读：未修改票价矩阵，未写入或清空账单；` +
+      `建议补录行请人工核对后粘贴到「4. 票价矩阵」保存。</span>`;
+  }
+
+  // 缺直达票价
+  const mBlock = $("audit-missing-block");
+  mBlock.hidden = miss.length === 0;
+  const mtb = $("audit-missing-table").querySelector("tbody");
+  mtb.innerHTML = "";
+  lastSuggestLines = [];
+  for (const m of miss) {
+    const tr = document.createElement("tr");
+    let statusHtml, priceHtml, pathHtml, lineHtml;
+    if (m.reachable) {
+      statusHtml = `<span class="tag tag-ok">可补录</span>`;
+      priceHtml = `<span class="charge">${yuan(m.suggested_price)}</span>`;
+      pathHtml = pathCellHtml(m);
+      lineHtml = `<code>${escapeHtml(m.suggest_line)}</code> `;
+      lastSuggestLines.push(m.suggest_line);
+    } else {
+      statusHtml = `<span class="tag tag-unreachable">不可达</span>` +
+        `<div class="sub">保留 MISSING_FARE</div>` +
+        (m.errors || []).map((e) =>
+          `<div class="sub err-line">${escapeHtml(e.message)}</div>`).join("");
+      priceHtml = "—";
+      pathHtml = "—";
+      lineHtml = "—";
+    }
+    tr.innerHTML = `
+      <td class="num">${m.from_zone} → ${m.to_zone}</td>
+      <td>${statusHtml}</td>
+      <td class="num">${priceHtml}</td>
+      <td class="wrap">${pathHtml}</td>
+      <td class="wrap">${affectedCellHtml(m.affected)}</td>
+      <td class="suggest-cell">${lineHtml}</td>`;
+    if (m.reachable) {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-ghost btn-mini";
+      btn.type = "button";
+      btn.textContent = "📋 复制";
+      btn.addEventListener("click", () =>
+        copyText(m.suggest_line,
+          `已复制建议补录行「${m.suggest_line}」（矩阵未改动，粘贴保存后生效）`));
+      tr.querySelector(".suggest-cell").appendChild(btn);
+    }
+    mtb.appendChild(tr);
+  }
+  $("btn-copy-suggests").hidden = lastSuggestLines.length === 0;
+
+  // 直达票价高于间接路径
+  const oBlock = $("audit-overpriced-block");
+  oBlock.hidden = over.length === 0;
+  const otb = $("audit-overpriced-table").querySelector("tbody");
+  otb.innerHTML = "";
+  for (const o of over) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="num">${o.from_zone} → ${o.to_zone}</td>
+      <td class="num">${yuan(o.direct_price)}</td>
+      <td class="num">${yuan(o.best_price)}</td>
+      <td class="num delta-up">+${yuan(o.diff)}</td>
+      <td class="wrap">${pathCellHtml(o)}</td>
+      <td class="wrap">${affectedCellHtml(o.affected)}</td>`;
+    otb.appendChild(tr);
+  }
+}
+
+async function runFareAudit() {
+  const status = $("audit-status");
+  status.textContent = "审计中…";
+  status.className = "status";
+  $("audit-errors").hidden = true;
+  $("audit-result").hidden = true;
+  $("btn-copy-suggests").hidden = true;
+  try {
+    const data = await api("/api/fare-path-audit", { method: "POST" });
+    renderFareAudit(data);
+    const miss = data.missing || [];
+    const over = data.overpriced || [];
+    if (!miss.length && !over.length) {
+      status.textContent = `审计通过：${data.pair_count} 个分区对均无异常（只读，未改动数据）`;
+    } else {
+      status.textContent =
+        `审计完成：${miss.length} 对缺直达票价，${over.length} 对直达偏贵` +
+        "（只读，矩阵与账单均未改动）";
+    }
+    status.className = "status ok";
+    toast("路径审计完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderAuditErrors(errors);
+      status.textContent =
+        `存在 ${errors.length} 个数据错误，未生成审计结果（矩阵与账单均未改动）`;
+    } else {
+      status.textContent = summaryError(e, "路径审计请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行路径审计", false);
+  }
+}
+
+function copyAllSuggests() {
+  if (!lastSuggestLines.length) return;
+  copyText(lastSuggestLines.join("\n"),
+    `已复制 ${lastSuggestLines.length} 行建议补录行（可粘贴到「4. 票价矩阵」，核对后保存）`);
 }
 
 /* ---------------- 演示数据 ---------------- */
@@ -621,6 +781,8 @@ function bind() {
 
   $("btn-gen-fares").addEventListener("click", genFareTemplate);
   $("btn-repair").addEventListener("click", runRepairPreview);
+  $("btn-fare-audit").addEventListener("click", runFareAudit);
+  $("btn-copy-suggests").addEventListener("click", copyAllSuggests);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);

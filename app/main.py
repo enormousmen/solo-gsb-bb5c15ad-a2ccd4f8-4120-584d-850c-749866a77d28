@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .core import (
     Config,
+    fare_path_audit,
     parse_fares_text,
     parse_records_text,
     parse_stations_text,
@@ -36,7 +37,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -263,6 +264,42 @@ def run_repair_preview():
         "shown_plans": result.shown_plans,
         "hidden_plans": result.hidden_plans,
         "plans": result.plans,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 票价矩阵路径审计（只读：不改矩阵、不写/清空账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/fare-path-audit")
+def run_fare_path_audit():
+    """对已保存数据做票价矩阵路径审计。
+
+    - 以分区为节点、已配置的有向票价为边，对已保存刷卡记录配对出的
+      实际行程分区对计算最低成本路径（整数分 Dijkstra，相同总价按
+      分区序列稳定选路，零价边与非对称方向按图语义处理）；
+    - 缺直达票价但可达：给出建议票价、完整路径、建议补录行及
+      受影响卡号与原始行号；不可达：保留原 MISSING_FARE 定位错误；
+    - 已有直达票价高于间接路径：标出差额（直达 − 间接最低）；
+    - 除 MISSING_FARE 外的数据错误：返回 422 与 verify() 的原有定位错误；
+    - 全程只读：不修改票价矩阵、不写入也不清空账单。
+    """
+    with db.connect() as conn:
+        cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+        result = fare_path_audit(stations, fares, records, cfg)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "trip_count": result.trip_count,
+        "pair_count": result.pair_count,
+        "missing": result.missing,
+        "overpriced": result.overpriced,
     }
 
 

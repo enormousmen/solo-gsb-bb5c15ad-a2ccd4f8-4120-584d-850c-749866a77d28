@@ -310,3 +310,28 @@ td.wrap { white-space: normal; min-width: 240px; }
   max-height: 220px;
   overflow-y: auto;
 }
+
+/* ---------------- 票价矩阵路径审计 ---------------- */
+.audit-result { margin-top: 12px; }
+
+.audit-summary {
+  background: #eef3fe;
+  border: 1px solid #c8d7f7;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+}
+.audit-summary .sub { color: var(--muted); font-size: 12px; }
+
+.audit-result td .sub { color: var(--muted); font-size: 12px; }
+.audit-result td .err-line { color: var(--danger-text); }
+.audit-result .path-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.tag-ok { background: var(--save); }
+.tag-unreachable { background: var(--danger-text); }
+.btn-mini { padding: 2px 8px; font-size: 12px; }
+.suggest-cell { white-space: nowrap; }
+.suggest-cell .btn { margin-left: 6px; }

@@ -229,6 +229,63 @@ A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
       </div>
     </section>
 
+    <!-- 票价矩阵路径审计 -->
+    <section class="card" id="sec-fare-audit">
+      <h2>8. 票价矩阵路径审计</h2>
+      <p class="hint">以分区为节点、已配置的有向票价为边，对<strong>已保存</strong>刷卡记录配对出的
+        实际行程分区对计算最低成本路径：缺直达票价但可达时给出<strong>建议票价、完整路径</strong>
+        及受影响卡号与原始行号；已有直达票价高于间接路径时标出差额；不可达的分区对保留
+        <code>MISSING_FARE</code>。相同总价按分区序列稳定选路，零价边与非对称方向均按有向图语义处理。
+        审计<strong>全程只读</strong>：不修改票价矩阵、不写入或清空账单；建议补录行需人工核对后
+        粘贴到「4. 票价矩阵」保存。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-fare-audit" type="button">🧭 运行路径审计</button>
+        <button class="btn btn-ghost" id="btn-copy-suggests" type="button" hidden>📋 复制全部建议补录行</button>
+        <span id="audit-status" class="status"></span>
+      </div>
+
+      <div id="audit-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行路径审计 —— 存在以下数据错误，请先修复（矩阵与账单均未改动）</h3>
+        <ul id="audit-errors-list"></ul>
+      </div>
+
+      <div id="audit-result" class="audit-result" hidden>
+        <div id="audit-summary" class="audit-summary"></div>
+
+        <div id="audit-missing-block" hidden>
+          <h3>缺直达票价的分区对</h3>
+          <div class="table-wrap">
+            <table id="audit-missing-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>状态</th><th>建议票价</th>
+                  <th>最低成本路径（完整路径）</th>
+                  <th>受影响行程（卡号 / 原始行号）</th><th>建议补录行</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="audit-overpriced-block" hidden>
+          <h3>直达票价高于间接路径的分区对</h3>
+          <div class="table-wrap">
+            <table id="audit-overpriced-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>直达票价</th><th>间接最低</th><th>差额</th>
+                  <th>最低成本路径（完整路径）</th>
+                  <th>受影响行程（卡号 / 原始行号）</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>

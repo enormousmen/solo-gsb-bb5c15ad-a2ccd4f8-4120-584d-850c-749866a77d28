@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import heapq
 import math
 import re
 from dataclasses import dataclass, field
@@ -121,6 +122,9 @@ class VerifyResult:
     ok: bool
     bills: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    # 配对成功的行程 (卡号, 卡内序号, 进站记录, 出站记录)，内部使用：
+    # 即使核验失败（如 MISSING_FARE）也会带出，供路径审计复用。
+    trips: list = field(default_factory=list)
 
 
 @dataclass
@@ -325,6 +329,17 @@ def validate_config(cfg: Config) -> list[dict]:
 # 核验 + 计价
 # ---------------------------------------------------------------------------
 
+def _missing_fare_error(card: str, sw_in: "Swipe", sw_out: "Swipe",
+                        z1: int, z2: int) -> dict:
+    """票价矩阵缺项的定位错误（verify 与路径审计共用同一文案与定位）。"""
+    return _err(
+        "MISSING_FARE",
+        f"票价矩阵缺少分区 {z1}->{z2}（{sw_in.station} -> "
+        f"{sw_out.station}）的票价",
+        line=sw_in.line, card=card, time=sw_in.time_text,
+        station=sw_in.station)
+
+
 def verify(stations: list[Station],
            fares: list[Fare],
            records: list[Swipe],
@@ -439,16 +454,11 @@ def verify(stations: list[Station],
         if z1 is None or z2 is None:
             continue
         if (z1, z2) not in fare_of:
-            errors.append(_err(
-                "MISSING_FARE",
-                f"票价矩阵缺少分区 {z1}->{z2}（{sw_in.station} -> "
-                f"{sw_out.station}）的票价",
-                line=sw_in.line, card=card, time=sw_in.time_text,
-                station=sw_in.station))
+            errors.append(_missing_fare_error(card, sw_in, sw_out, z1, z2))
 
     if errors:
         # 原子失败：不生成任何账单（无部分账单）
-        return VerifyResult(ok=False, bills=[], errors=errors)
+        return VerifyResult(ok=False, bills=[], errors=errors, trips=trips)
 
     # 5) 计价：按 (卡号, 进站时刻) 顺序处理。
     #    - 换乘抵扣看「同卡前次出站 -> 本次进站」的真实间隔（跨运营日也算）；
@@ -519,7 +529,7 @@ def verify(stations: list[Station],
         seq_by_card[b["card"]] = seq_by_card.get(b["card"], 0) + 1
         b["seq"] = seq_by_card[b["card"]]
 
-    return VerifyResult(ok=True, bills=bills, errors=[])
+    return VerifyResult(ok=True, bills=bills, errors=[], trips=trips)
 
 
 # ---------------------------------------------------------------------------
@@ -888,4 +898,202 @@ def trial_compare(stations: list[Station],
         rows=rows,
         card_summaries=card_summaries,
         batch_summary=batch_summary,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 票价矩阵路径审计（只读：不改矩阵、不写账单）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FarePathAudit:
+    """票价矩阵路径审计结果。
+
+    ok=False 时 errors 为 verify() 的原有定位错误（除 MISSING_FARE 外的
+    数据错误原样返回，不生成审计结果）。
+    ok=True 时 missing / overpriced 为按 (起始分区, 到达分区) 稳定排序的
+    审计发现；不可达的缺失分区对 reachable=False，并在该项 errors 内
+    保留原 MISSING_FARE 定位错误。
+    """
+    ok: bool
+    trip_count: int = 0
+    pair_count: int = 0
+    missing: list[dict] = field(default_factory=list)
+    overpriced: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+
+
+def _cents_of(yuan: float) -> int:
+    """元 -> 整数分。路径成本全程以整数分累加，避免浮点误差影响等值比较。"""
+    return int(round(float(yuan) * 100))
+
+
+def _yuan_of(cents: int) -> float:
+    return round(cents / 100.0, 2)
+
+
+def _min_cost_paths(fare_cents: dict[tuple[int, int], int], source: int
+                    ) -> dict[int, tuple[int, tuple[int, ...]]]:
+    """从 source 出发到各分区的 (最低成本分, 分区序列)，Dijkstra。
+
+    - 边为已配置的有向票价（非对称方向按图语义处理，零价边合法）；
+    - 优先队列键为 (成本, 分区序列)：相同总价按分区序列字典序稳定选路；
+    - 回到 source 的边不参与中途松弛（简单路径不会重返起点）；
+      source 自身的同区闭合成本由 _min_cycle 另行计算。
+    """
+    adj: dict[int, list[tuple[int, int]]] = {}
+    for (fz, tz), c in fare_cents.items():
+        if tz == source and fz != source:
+            continue  # 重返起点的边只在闭合同区路径时考虑
+        adj.setdefault(fz, []).append((tz, c))
+    for lst in adj.values():
+        lst.sort()
+
+    dist: dict[int, tuple[int, tuple[int, ...]]] = {source: (0, (source,))}
+    pq: list[tuple[int, tuple[int, ...], int]] = [(0, (source,), source)]
+    while pq:
+        cost, path, u = heapq.heappop(pq)
+        if dist.get(u) != (cost, path):
+            continue  # 过期堆项
+        for v, w in adj.get(u, ()):
+            cand = (cost + w, path + (v,))
+            cur = dist.get(v)
+            if cur is None or cand < cur:
+                dist[v] = cand
+                heapq.heappush(pq, (cost + w, path + (v,), v))
+    return dist
+
+
+def _min_cycle(fare_cents: dict[tuple[int, int], int],
+               dist: dict[int, tuple[int, tuple[int, ...]]],
+               source: int) -> Optional[tuple[int, tuple[int, ...]]]:
+    """同区对 (source, source) 的最低成本闭合路径（至少经过一条边）。
+
+    dist 为不重返 source 的最短路径；枚举最后一条回到 source 的边闭合。
+    直达自环边（source->source 本身）不算间接路径，不参与闭合。
+    """
+    best: Optional[tuple[int, tuple[int, ...]]] = None
+    for (fz, tz), c in fare_cents.items():
+        if tz != source or fz == source:
+            continue
+        d = dist.get(fz)
+        if d is None:
+            continue
+        cand = (d[0] + c, d[1] + (source,))
+        if best is None or cand < best:
+            best = cand
+    return best
+
+
+def _path_legs(path: tuple[int, ...],
+               fare_yuan: dict[tuple[int, int], float]) -> list[dict]:
+    """完整路径的逐段明细（每段的起讫分区与已配置单价）。"""
+    return [{"from_zone": a, "to_zone": b, "price": fare_yuan[(a, b)]}
+            for a, b in zip(path, path[1:])]
+
+
+def fare_path_audit(stations: list[Station],
+                    fares: list[Fare],
+                    records: list[Swipe],
+                    cfg: Config) -> FarePathAudit:
+    """票价矩阵路径审计（全程只读：不修改矩阵、不写/清空账单）。
+
+    以分区为节点、已配置的有向票价为边，对已保存刷卡记录配对出的
+    实际行程分区对计算最低成本路径：
+
+    - 缺直达票价但存在可达路径：给出建议票价（= 最低成本路径总价）、
+      完整路径、建议补录行，以及受影响卡号与原始行号；
+    - 缺直达票价且不可达：保留 verify() 的原 MISSING_FARE 定位错误；
+    - 已有直达票价高于间接路径：标出差额（直达 − 间接最低）与最低成本路径；
+    - 除 MISSING_FARE 外的数据错误：按 verify() 原有定位错误返回，不生成审计。
+
+    相同总价按分区序列字典序稳定选路；零价边与非对称方向按有向图语义处理；
+    同区行程按「至少经过一条边」的闭合路径计算。
+    """
+    result = verify(stations, fares, records, cfg)
+    if not result.ok:
+        blocking = [e for e in result.errors if e.get("code") != "MISSING_FARE"]
+        if blocking:
+            # 非缺票价错误原样返回（含原有定位信息），不生成审计
+            return FarePathAudit(ok=False, errors=result.errors)
+
+    # 此时核验要么全部通过，要么仅剩 MISSING_FARE：站点必然全部已知
+    zone_of = {s.name: s.zone for s in stations}
+    fare_cents = {(f.from_zone, f.to_zone): _cents_of(f.price) for f in fares}
+    fare_yuan = {(f.from_zone, f.to_zone): _round2(f.price) for f in fares}
+
+    # 实际行程分区对 -> 该对上的原始行程（卡号 / 序号 / 进出站记录）
+    pair_trips: dict[tuple[int, int], list[tuple[str, int, Swipe, Swipe]]] = {}
+    for card, seq, sw_in, sw_out in result.trips:
+        key = (zone_of[sw_in.station], zone_of[sw_out.station])
+        pair_trips.setdefault(key, []).append((card, seq, sw_in, sw_out))
+
+    # 每个涉及的起始分区跑一次 Dijkstra（整数分、非负边、稳定选路）
+    dist_by_src = {z: _min_cost_paths(fare_cents, z)
+                   for z in {p[0] for p in pair_trips}}
+
+    def best_path(z1: int, z2: int):
+        if z1 == z2:
+            return _min_cycle(fare_cents, dist_by_src[z1], z1)
+        return dist_by_src[z1].get(z2)
+
+    missing: list[dict] = []
+    overpriced: list[dict] = []
+    for z1, z2 in sorted(pair_trips):
+        raw = sorted(pair_trips[(z1, z2)], key=lambda t: (t[0], t[1]))
+        affected = [{
+            "card": c, "seq": s,
+            "entry_time": i.time_text,
+            "entry_station": i.station, "exit_station": o.station,
+            "entry_line": i.line, "exit_line": o.line,
+        } for c, s, i, o in raw]
+        got = best_path(z1, z2)
+        direct = fare_cents.get((z1, z2))
+
+        if direct is None:
+            item: dict = {
+                "from_zone": z1, "to_zone": z2,
+                "reachable": got is not None,
+                "suggested_price": None,
+                "path": None, "path_text": None, "legs": [],
+                "suggest_line": None,
+                "affected": affected, "trip_count": len(affected),
+                "errors": [],
+            }
+            if got is not None:
+                cents, path = got
+                price = _yuan_of(cents)
+                item.update({
+                    "suggested_price": price,
+                    "path": list(path),
+                    "path_text": " → ".join(str(z) for z in path),
+                    "legs": _path_legs(path, fare_yuan),
+                    "suggest_line": f"{z1}, {z2}, {price:.2f}",
+                })
+            else:
+                # 不可达：保留原 MISSING_FARE 定位错误（逐受影响行程一条）
+                item["errors"] = [
+                    _missing_fare_error(c, i, o, z1, z2) for c, s, i, o in raw
+                ]
+            missing.append(item)
+        elif got is not None and got[0] < direct:
+            cents, path = got
+            best = _yuan_of(cents)
+            overpriced.append({
+                "from_zone": z1, "to_zone": z2,
+                "direct_price": fare_yuan[(z1, z2)],
+                "best_price": best,
+                "diff": _round2(fare_yuan[(z1, z2)] - best),
+                "path": list(path),
+                "path_text": " → ".join(str(z) for z in path),
+                "legs": _path_legs(path, fare_yuan),
+                "affected": affected, "trip_count": len(affected),
+            })
+
+    return FarePathAudit(
+        ok=True,
+        trip_count=len(result.trips),
+        pair_count=len(pair_trips),
+        missing=missing,
+        overpriced=overpriced,
     )
