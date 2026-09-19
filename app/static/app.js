@@ -322,7 +322,7 @@ function genFareTemplate() {
   toast(`已生成 ${n}×${n} 对称模板，请核对并保存`);
 }
 
-/* ---------------- 5. 核验 ---------------- */
+/* ---------------- 8. 核验 ---------------- */
 
 function renderErrorLi(e) {
   const li = document.createElement("li");
@@ -476,7 +476,7 @@ function renderRepairPlans(data) {
   });
 }
 
-async function copyText(text) {
+async function copyText(text, message = "已复制修复后的记录文本（仍未保存，可粘贴到记录区核对）") {
   try {
     if (navigator.clipboard) {
       await navigator.clipboard.writeText(text);
@@ -490,7 +490,7 @@ async function copyText(text) {
       document.execCommand("copy");
       document.body.removeChild(ta);
     }
-    toast("已复制修复后的记录文本（仍未保存，可粘贴到记录区核对）");
+    toast(message);
   } catch (_) {
     toast("复制失败，请手动选中文本复制", false);
   }
@@ -526,6 +526,143 @@ async function runRepairPreview() {
     }
     status.className = "status bad";
     toast("无法生成修复预览", false);
+  }
+}
+
+/* ---------------- 7. 票价矩阵路径审计（只读） ---------------- */
+
+function auditAffectedHtml(item) {
+  // 受影响卡号 + 每程原始行号；occurrences 已按卡号、进站时刻排序。
+  const lines = item.occurrences.map((o) =>
+    `<li>${escapeHtml(o.card)} · ${o.entry_time} ～ ${o.exit_time} · ` +
+    `${escapeHtml(o.entry_station)} → ${escapeHtml(o.exit_station)}` +
+    `<span class="sub">（进第 ${o.entry_line} 行 / 出第 ${o.exit_line} 行）</span></li>`);
+  const cards = item.affected_cards.map(escapeHtml).join("、");
+  return `<div class="audit-affected"><div>卡号：<strong>${cards}</strong>` +
+    `（共 ${item.affected_count} 程）</div><ul>${lines.join("")}</ul></div>`;
+}
+
+function copyRowBtn(line, label) {
+  const btn = document.createElement("button");
+  btn.className = "btn btn-ghost btn-mini";
+  btn.type = "button";
+  btn.textContent = "📋 复制";
+  btn.addEventListener("click", () =>
+    copyText(line, "已复制建议行（审计只读，请粘贴到第 4 区票价矩阵保存）"));
+  btn.title = label;
+  return btn;
+}
+
+function renderAuditSuggestions(items) {
+  const block = $("audit-suggest-block");
+  block.hidden = items.length === 0;
+  const tb = $("audit-suggest-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const s of items) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="num"><strong>${s.from_zone} → ${s.to_zone}</strong></td>
+      <td class="num charge">${yuan(s.suggested_fare)}</td>
+      <td class="num">${s.hop_count}</td>
+      <td class="wrap audit-path">${escapeHtml(s.path_text)}</td>
+      <td class="wrap">${auditAffectedHtml(s)}</td>
+      <td class="num audit-line"><code>${escapeHtml(s.suggested_line)}</code></td>
+      <td></td>`;
+    tr.lastElementChild.appendChild(
+      copyRowBtn(s.suggested_line, "复制建议补录行"));
+    tb.appendChild(tr);
+  }
+}
+
+function renderAuditOverpriced(items) {
+  const block = $("audit-over-block");
+  block.hidden = items.length === 0;
+  const tb = $("audit-over-table").querySelector("tbody");
+  tb.innerHTML = "";
+  for (const o of items) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="num"><strong>${o.from_zone} → ${o.to_zone}</strong></td>
+      <td class="num">${yuan(o.direct_fare)}</td>
+      <td class="num">${yuan(o.indirect_fare)}</td>
+      <td class="num delta-up">+${yuan(o.diff)}</td>
+      <td class="wrap audit-path">${escapeHtml(o.path_text)}</td>
+      <td class="wrap">${auditAffectedHtml(o)}</td>
+      <td class="num audit-line"><code>${escapeHtml(o.suggested_line)}</code></td>
+      <td></td>`;
+    tr.lastElementChild.appendChild(
+      copyRowBtn(o.suggested_line, "复制建议改价行"));
+    tb.appendChild(tr);
+  }
+}
+
+function renderAuditMissing(errors) {
+  const block = $("audit-missing-block");
+  block.hidden = errors.length === 0;
+  const ul = $("audit-missing-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+}
+
+function renderAuditResult(data) {
+  $("audit-errors").hidden = true;
+  const panel = $("audit-result");
+  panel.hidden = false;
+
+  const allSuggested = data.suggestions.map((s) => s.suggested_line);
+  const copyAllBtn = $("btn-audit-copy-all");
+  copyAllBtn.onclick = () => copyText(
+    allSuggested.join("\n"),
+    `已复制 ${allSuggested.length} 行建议补录票价（审计只读，未修改矩阵）`);
+
+  $("audit-summary").innerHTML =
+    `实际行程共 <strong>${data.pair_count}</strong> 个分区对：` +
+    `<span class="audit-ok">直达票价合理 <strong>${data.direct_ok_count}</strong></span> · ` +
+    `<span class="audit-sugg">缺直达但可达（建议补录）<strong>${data.suggestion_count}</strong></span> · ` +
+    `<span class="audit-over">直达偏高（建议下调）<strong>${data.overpriced_count}</strong></span> · ` +
+    `<span class="audit-miss">不可达（MISSING_FARE）<strong>${data.missing_count}</strong></span>。` +
+    `<br><span class="sub">相同总价按分区序列稳定选路（等价时优先直达）；` +
+    `审计全程只读，票价矩阵与账单均未改动。</span>`;
+
+  renderAuditSuggestions(data.suggestions);
+  renderAuditOverpriced(data.overpriced);
+  renderAuditMissing(data.missing_errors);
+}
+
+async function runFareAudit() {
+  const status = $("audit-status");
+  status.textContent = "路径计算中…";
+  status.className = "status";
+  $("audit-errors").hidden = true;
+  $("audit-result").hidden = true;
+  try {
+    const data = await api("/api/fare-audit", { method: "POST" });
+    renderAuditResult(data);
+    if (data.suggestion_count === 0 && data.overpriced_count === 0 &&
+        data.missing_count === 0) {
+      status.textContent =
+        `审计完成：${data.pair_count} 个分区对的直达票价均为最低成本路径`;
+    } else {
+      status.textContent =
+        `审计完成：建议补录 ${data.suggestion_count} · 直达偏高 ` +
+        `${data.overpriced_count} · 不可达 ${data.missing_count}`;
+    }
+    status.className = "status ok";
+    toast("票价矩阵路径审计完成（只读，未改动矩阵或账单）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      const ul = $("audit-errors-list");
+      ul.innerHTML = "";
+      for (const err of errors) ul.appendChild(renderErrorLi(err));
+      $("audit-errors").hidden = false;
+      status.textContent =
+        `存在 ${errors.length} 个数据错误，未执行路径审计（矩阵与账单均未改动）`;
+    } else {
+      status.textContent = summaryError(e, "路径审计请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行路径审计", false);
   }
 }
 
@@ -621,6 +758,7 @@ function bind() {
 
   $("btn-gen-fares").addEventListener("click", genFareTemplate);
   $("btn-repair").addEventListener("click", runRepairPreview);
+  $("btn-audit").addEventListener("click", runFareAudit);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);

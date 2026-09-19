@@ -310,3 +310,45 @@ td.wrap { white-space: normal; min-width: 240px; }
   max-height: 220px;
   overflow-y: auto;
 }
+
+/* ---------------- 票价矩阵路径审计 ---------------- */
+.audit-result { margin-top: 12px; }
+
+.audit-summary {
+  background: #eef3fe;
+  border: 1px solid #c8d7f7;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+}
+.audit-summary .sub { color: var(--muted); font-size: 12px; }
+.audit-summary .audit-ok { color: var(--success-text); margin-left: 4px; }
+.audit-summary .audit-sugg { color: #1c6b35; margin-left: 14px; }
+.audit-summary .audit-over { color: var(--danger-text); margin-left: 14px; }
+.audit-summary .audit-miss { color: #8a5a00; margin-left: 14px; }
+
+.audit-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.audit-block-head h3 { margin: 0; }
+
+.btn-mini { padding: 3px 10px; font-size: 12px; }
+
+.audit-path { white-space: normal; min-width: 220px; font-size: 12.5px; }
+.audit-line code { white-space: nowrap; }
+.audit-affected { font-size: 12.5px; white-space: normal; min-width: 230px; }
+.audit-affected ul { margin: 4px 0 0; padding-left: 18px; }
+.audit-affected li { margin-bottom: 3px; }
+.audit-affected .sub { color: var(--muted); font-size: 12px; }
+
+#audit-missing-block { margin-top: 12px; background: #fff4df; border-color: #eccf97; }
+#audit-missing-list { margin: 0; padding-left: 20px; }
+#audit-missing-list li { margin-bottom: 8px; color: #8a5a00; font-size: 13px; }
+#audit-missing-list .error-code { background: #f2d9a8; }
+#audit-missing-list .error-loc { color: #9c7335; }
+#audit-missing-block h3 { color: #8a5a00; margin-top: 0; }

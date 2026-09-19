@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import heapq
 import math
 import re
 from dataclasses import dataclass, field
@@ -322,43 +323,24 @@ def validate_config(cfg: Config) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 核验 + 计价
+# 进出站配对（verify 与票价矩阵路径审计共用）
 # ---------------------------------------------------------------------------
 
-def verify(stations: list[Station],
-           fares: list[Fare],
-           records: list[Swipe],
-           cfg: Config) -> VerifyResult:
-    """全量核验并计价。
+def _pair_trips(records: list[Swipe]
+                ) -> tuple[list[tuple[str, int, Swipe, Swipe]], list[dict]]:
+    """按卡号分组、时间升序，做重复刷卡 / 时间逆序 / 进出站结构检查并配对。
 
-    原子语义：任何记录级错误（缺出站、缺进站、时间逆序、重复刷卡、
-    未知站点、矩阵缺票价）都会使整批核验失败，不生成任何账单。
-    只有全部通过时才一次性产出全部行程账单。
+    返回 (trips, errors)：trips 为 (卡号, 卡内序号(从1), 进站记录, 出站记录)；
+    errors 为 DUPLICATE_SWIPE / TIME_REVERSED / MISSING_ENTRY / MISSING_EXIT
+    定位错误。检查与报错顺序与 verify() 历史实现保持一致：
+    先按卡号（首次出现顺序）逐卡报告重复刷卡、时间逆序，再做结构配对。
     """
-    errors: list[dict] = []
-    errors.extend(validate_config(cfg))
-
-    zone_of = {s.name: s.zone for s in stations}
-    fare_of: dict[tuple[int, int], float] = {
-        (f.from_zone, f.to_zone): f.price for f in fares
-    }
-
-    # 1) 站点引用检查（未知站点）
-    for r in records:
-        if r.station not in zone_of:
-            errors.append(_err(
-                "UNKNOWN_STATION",
-                f"刷卡站点 {r.station} 未在站点分区中定义",
-                line=r.line, card=r.card,
-                time=r.time_text, station=r.station))
-
-    # 2) 按卡号分组，时间升序，逐卡做重复刷卡 / 时间逆序 / 进出站结构检查
     by_card: dict[str, list[Swipe]] = {}
     for r in records:
         by_card.setdefault(r.card, []).append(r)
 
     trips: list[tuple[str, int, Swipe, Swipe]] = []
-    # trips: (卡号, 卡内序号(从1), 进站记录, 出站记录)
+    errors: list[dict] = []
 
     for card, rs in by_card.items():
         # 录入顺序（数据库按 id 返回，即文本录入先后）必须构成
@@ -393,13 +375,10 @@ def verify(stations: list[Station],
             continue
 
         # 时间流有序时录入顺序即时间顺序；逐对做进出站结构检查。
-        rs_sorted = rs
-
-        # 3) 进出站交替结构检查并配对。
-        #    期望从进站开始，进出成对；起始为出站=缺进站，末尾落单=缺出站。
+        # 期望从进站开始，进出成对；起始为出站=缺进站，末尾落单=缺出站。
         i, seq = 0, 0
-        while i < len(rs_sorted):
-            cur = rs_sorted[i]
+        while i < len(rs):
+            cur = rs[i]
             if cur.action != ACTION_IN:
                 errors.append(_err(
                     "MISSING_ENTRY",
@@ -409,7 +388,7 @@ def verify(stations: list[Station],
                     time=cur.time_text, station=cur.station))
                 i += 1
                 continue
-            if i + 1 >= len(rs_sorted):
+            if i + 1 >= len(rs):
                 errors.append(_err(
                     "MISSING_EXIT",
                     f"卡号 {card} 进站后缺失出站"
@@ -418,7 +397,7 @@ def verify(stations: list[Station],
                     time=cur.time_text, station=cur.station))
                 i += 1
                 continue
-            nxt = rs_sorted[i + 1]
+            nxt = rs[i + 1]
             if nxt.action != ACTION_OUT:
                 errors.append(_err(
                     "MISSING_EXIT",
@@ -432,7 +411,45 @@ def verify(stations: list[Station],
             trips.append((card, seq, cur, nxt))
             i += 2
 
-    # 4) 票价矩阵覆盖检查（仅对结构完整、站点已知的行程）
+    return trips, errors
+
+
+# ---------------------------------------------------------------------------
+# 核验 + 计价
+# ---------------------------------------------------------------------------
+
+def verify(stations: list[Station],
+           fares: list[Fare],
+           records: list[Swipe],
+           cfg: Config) -> VerifyResult:
+    """全量核验并计价。
+
+    原子语义：任何记录级错误（缺出站、缺进站、时间逆序、重复刷卡、
+    未知站点、矩阵缺票价）都会使整批核验失败，不生成任何账单。
+    只有全部通过时才一次性产出全部行程账单。
+    """
+    errors: list[dict] = []
+    errors.extend(validate_config(cfg))
+
+    zone_of = {s.name: s.zone for s in stations}
+    fare_of: dict[tuple[int, int], float] = {
+        (f.from_zone, f.to_zone): f.price for f in fares
+    }
+
+    # 1) 站点引用检查（未知站点）
+    for r in records:
+        if r.station not in zone_of:
+            errors.append(_err(
+                "UNKNOWN_STATION",
+                f"刷卡站点 {r.station} 未在站点分区中定义",
+                line=r.line, card=r.card,
+                time=r.time_text, station=r.station))
+
+    # 2) 按卡号分组，时间升序，逐卡做重复刷卡 / 时间逆序 / 进出站结构检查并配对
+    trips, struct_errors = _pair_trips(records)
+    errors.extend(struct_errors)
+
+    # 3) 票价矩阵覆盖检查（仅对结构完整、站点已知的行程）
     for card, seq, sw_in, sw_out in trips:
         z1 = zone_of.get(sw_in.station)
         z2 = zone_of.get(sw_out.station)
@@ -888,4 +905,272 @@ def trial_compare(stations: list[Station],
         rows=rows,
         card_summaries=card_summaries,
         batch_summary=batch_summary,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 票价矩阵路径审计（只读：不改矩阵、不写账单）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FareAuditResult:
+    """票价矩阵路径审计结果。
+
+    ok=False 时 errors 为阻断性错误（CONFIG_BAD / UNKNOWN_STATION /
+    DUPLICATE_SWIPE / TIME_REVERSED / MISSING_ENTRY / MISSING_EXIT）的
+    原有定位错误，不产出审计结论。
+    ok=True 时：
+    - suggestions：缺少直达票价但存在可达（多跳/零价环）路径的分区对，
+      给出建议票价、完整路径与受影响行程（卡号 + 原始行号）；
+    - overpriced：已有直达票价高于间接最低成本路径的分区对，标出差额；
+    - missing_errors：实际行程需要但既无直达票价也不可达的分区对，
+      沿用 verify() 的 MISSING_FARE 定位错误（每程一条）；
+    - direct_ok：实际行程中直达票价不高于间接路径的分区对数。
+    """
+    ok: bool
+    suggestions: list[dict] = field(default_factory=list)
+    overpriced: list[dict] = field(default_factory=list)
+    missing_errors: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+    pair_count: int = 0
+    direct_ok_count: int = 0
+
+
+def _build_adjacency(stations: list[Station], fares: list[Fare]
+                     ) -> tuple[list[int], dict[int, list[tuple[int, float]]]]:
+    """构造有向图：分区为节点、已配置的有向票价为边。
+
+    节点集合 = 站点分区 ∪ 票价矩阵中出现的分区；同一对分区票价唯一
+    （录入阶段已去重），故每对节点至多一条边。
+    """
+    zones = {s.zone for s in stations}
+    for f in fares:
+        zones.add(f.from_zone)
+        zones.add(f.to_zone)
+    nodes = sorted(zones)
+    adj: dict[int, list[tuple[int, float]]] = {z: [] for z in nodes}
+    for f in fares:
+        adj[f.from_zone].append((f.to_zone, f.price))
+    for edges in adj.values():
+        edges.sort(key=lambda e: e[0])
+    return nodes, adj
+
+
+def _shortest_paths(src: int,
+                    adj: dict[int, list[tuple[int, float]]]
+                    ) -> dict[int, tuple[float, list[int]]]:
+    """从 src 出发的最低成本路径（Dijkstra）。
+
+    - 边权非负（允许 0 价边）；
+    - 相同总价时按「分区序列」字典序稳定选路（路径为简单路径，
+      0 价绕行环不会被选入，因为相同成本下更短/字典序更小的路径占优）；
+    - 仅使用有向边，方向非对称时分别计算。
+
+    返回 dst -> (最低成本, 分区序列[含 src 与 dst])，dst=src 时表示回到本
+    分区的非空简单路径（自环或绕行环），用于同分区进出的行程审计。
+    """
+    # 标签为 (成本, 路径序列)：先比成本，成本相同比序列字典序。
+    best: dict[int, tuple[float, list[int]]] = {}
+    heap: list[tuple[float, list[int]]] = []
+    # 自环 src->src 初始即为 [src, src]，弹出时按「回到起点」分支参与比较。
+    for nbr, w in adj.get(src, ()):
+        heapq.heappush(heap, (_round2(w), [src, nbr]))
+
+    while heap:
+        cost, path = heapq.heappop(heap)
+        dst = path[-1]
+        if dst == src:
+            # 回到起点：候选环路径，不继续扩展（再走会重复 src）。
+            if src not in best or (cost, path) < best[src]:
+                best[src] = (cost, path)
+            continue
+        old = best.get(dst)
+        if old is not None:
+            if (cost, path) >= old:
+                continue
+        best[dst] = (cost, path)
+        visited = set(path)
+        for nbr, w in adj.get(dst, ()):
+            if nbr in visited:
+                # 保持路径为简单路径；经已访问节点（含 src）的边不展开，
+                # 回到 src 的环由该节点自身的入边候选覆盖。
+                if nbr == src:
+                    cand = (_round2(cost + w), path + [src])
+                    if src not in best or cand < best[src]:
+                        best[src] = cand
+                continue
+            heapq.heappush(heap, (_round2(cost + w), path + [nbr]))
+
+    return best
+
+
+def _path_hops(path: list[int], fare_of: dict[tuple[int, int], float]
+               ) -> list[dict]:
+    """把分区序列展开为逐跳明细（每跳都是矩阵中已配置的有向票价）。"""
+    hops = []
+    for a, b in zip(path, path[1:]):
+        hops.append({"from_zone": a, "to_zone": b,
+                     "price": _round2(fare_of[(a, b)])})
+    return hops
+
+
+def _missing_fare_error(o: dict, z1: int, z2: int) -> dict:
+    """与 verify() 完全一致的 MISSING_FARE 定位错误（沿用原定位信息）。"""
+    return _err(
+        "MISSING_FARE",
+        f"票价矩阵缺少分区 {z1}->{z2}（{o['entry_station']} -> "
+        f"{o['exit_station']}）的票价",
+        line=o["entry_line"], card=o["card"], time=o["entry_time"],
+        station=o["entry_station"])
+
+
+def fare_audit(stations: list[Station],
+               fares: list[Fare],
+               records: list[Swipe],
+               cfg: Config) -> FareAuditResult:
+    """票价矩阵路径审计（只读）。
+
+    复用已保存的站点、票价与刷卡记录：以分区为节点、已配置的有向票价
+    为边，对每张卡实际行程的分区对求最低成本路径。
+
+    - 缺少直达票价但存在可达路径 → suggestions：建议票价（路径总价）、
+      完整路径（分区序列 + 逐跳票价）、受影响卡号与原始行号，并给出可
+      直接补录进票价矩阵的建议行文本；
+    - 已有直达票价但高于间接路径 → overpriced：标出差额（直达 − 间接），
+      并给出建议改价行；相同总价按分区序列稳定选路（直达边序列为
+      [z1, z2]，字典序最小，故等价时不会误报）；
+    - 不可达（也没有回到本分区的非空路径）→ 沿用 MISSING_FARE 原定位
+      错误（missing_errors，按实际行程逐程给出）；
+    - 其他数据错误（未知站点、重复刷卡、时间逆序、缺进/出站、配置非法）
+      为阻断性错误，原样返回，不产出任何审计结论。
+
+    审计全程只读：不修改矩阵或账单。
+    """
+    errors: list[dict] = []
+    errors.extend(validate_config(cfg))
+
+    zone_of = {s.name: s.zone for s in stations}
+    fare_of: dict[tuple[int, int], float] = {
+        (f.from_zone, f.to_zone): f.price for f in fares
+    }
+
+    for r in records:
+        if r.station not in zone_of:
+            errors.append(_err(
+                "UNKNOWN_STATION",
+                f"刷卡站点 {r.station} 未在站点分区中定义",
+                line=r.line, card=r.card,
+                time=r.time_text, station=r.station))
+
+    trips, struct_errors = _pair_trips(records)
+    errors.extend(struct_errors)
+    if errors:
+        return FareAuditResult(ok=False, errors=errors)
+
+    _, adj = _build_adjacency(stations, fares)
+
+    # 实际行程按分区对归组（按卡号 + 进站时刻稳定排序），保留每程定位信息。
+    groups: dict[tuple[int, int], list[dict]] = {}
+    for card, _seq, sw_in, sw_out in sorted(trips, key=lambda x: (x[0], x[2].t)):
+        z1, z2 = zone_of[sw_in.station], zone_of[sw_out.station]
+        groups.setdefault((z1, z2), []).append({
+            "card": card,
+            "entry_time": sw_in.time_text,
+            "exit_time": sw_out.time_text,
+            "entry_station": sw_in.station,
+            "exit_station": sw_out.station,
+            "entry_line": sw_in.line,
+            "exit_line": sw_out.line,
+        })
+
+    suggestions: list[dict] = []
+    overpriced: list[dict] = []
+    unreachable: set[tuple[int, int]] = set()
+    direct_ok = 0
+
+    # 每个起点只跑一次 Dijkstra（同一起点的多个分区对复用结果）。
+    shortest_cache: dict[int, dict[int, tuple[float, list[int]]]] = {}
+
+    def occurrence_lines(occ: list[dict]) -> str:
+        return "、".join(f"{o['card']}（进第 {o['entry_line']} 行/"
+                         f"出第 {o['exit_line']} 行）" for o in occ)
+
+    for (z1, z2), occ in sorted(groups.items()):
+        table = shortest_cache.get(z1)
+        if table is None:
+            table = _shortest_paths(z1, adj)
+            shortest_cache[z1] = table
+        best = table.get(z2)
+
+        direct = fare_of.get((z1, z2))
+        if best is None:
+            # 不可达：先记下分区对，稍后按实际行程顺序逐程给出
+            # MISSING_FARE（与 verify 的报错顺序、定位信息一致）。
+            unreachable.add((z1, z2))
+            continue
+
+        best_cost, path = best
+        best_cost = _round2(best_cost)
+        hops = _path_hops(path, fare_of)
+        path_text = " → ".join(
+            f"{h['from_zone']}→{h['to_zone']}({h['price']:.2f}元)" for h in hops)
+
+        if direct is None:
+            # 缺直达票价但可达：给出建议补录行。
+            suggestions.append({
+                "from_zone": z1,
+                "to_zone": z2,
+                "suggested_fare": best_cost,
+                "hop_count": len(hops),
+                "path_zones": path,
+                "hops": hops,
+                "path_text": path_text,
+                "affected_cards": sorted({o["card"] for o in occ}),
+                "affected_count": len(occ),
+                "occurrences": occ,
+                "affected_text": occurrence_lines(occ),
+                "suggested_line": f"{z1}, {z2}, {best_cost:.2f}",
+            })
+        else:
+            direct = _round2(direct)
+            if direct > best_cost:
+                diff = _round2(direct - best_cost)
+                overpriced.append({
+                    "from_zone": z1,
+                    "to_zone": z2,
+                    "direct_fare": direct,
+                    "indirect_fare": best_cost,
+                    "diff": diff,
+                    "hop_count": len(hops),
+                    "path_zones": path,
+                    "hops": hops,
+                    "path_text": path_text,
+                    "affected_cards": sorted({o["card"] for o in occ}),
+                    "affected_count": len(occ),
+                    "occurrences": occ,
+                    "affected_text": occurrence_lines(occ),
+                    "suggested_line": f"{z1}, {z2}, {best_cost:.2f}",
+                })
+            else:
+                direct_ok += 1
+
+    # 不可达分区对：按实际行程顺序（卡号分组、卡内时间升序）逐程给出
+    # 与 verify() 完全一致的 MISSING_FARE 定位错误，保持原报错顺序。
+    missing_errors: list[dict] = []
+    for card, _seq, sw_in, sw_out in trips:
+        z1, z2 = zone_of[sw_in.station], zone_of[sw_out.station]
+        if (z1, z2) in unreachable:
+            missing_errors.append(_missing_fare_error(
+                {"card": card, "entry_line": sw_in.line,
+                 "entry_time": sw_in.time_text,
+                 "entry_station": sw_in.station,
+                 "exit_station": sw_out.station}, z1, z2))
+
+    return FareAuditResult(
+        ok=True,
+        suggestions=suggestions,
+        overpriced=overpriced,
+        missing_errors=missing_errors,
+        pair_count=len(groups),
+        direct_ok_count=direct_ok,
     )

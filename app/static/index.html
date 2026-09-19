@@ -197,9 +197,73 @@ A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
       </div>
     </section>
 
+    <!-- 票价矩阵路径审计 -->
+    <section class="card" id="sec-audit">
+      <h2>7. 票价矩阵路径审计</h2>
+      <p class="hint">复用<strong>已保存</strong>的站点分区、票价矩阵与刷卡记录：以分区为节点、已配置的
+        <strong>有向票价为边</strong>，计算每张卡实际行程分区对的<strong>最低成本路径</strong>
+        （Dijkstra，正确处理 0 价边与非对称方向；相同总价按分区序列稳定选路）。
+        缺少直达票价但存在可达路径时，给出建议票价、完整路径、受影响卡号与原始行号；
+        已有直达票价高于间接路径时标出差额；不可达时保留 <code>MISSING_FARE</code>。
+        审计<strong>全程只读</strong>，不修改矩阵或账单，可复制建议补录行后到第 4 区人工补录。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-audit" type="button">🔍 执行路径审计</button>
+        <span id="audit-status" class="status"></span>
+      </div>
+
+      <div id="audit-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行审计 —— 存在数据错误，请先按定位处理（矩阵与账单均未改动）</h3>
+        <ul id="audit-errors-list"></ul>
+      </div>
+
+      <div id="audit-result" class="audit-result" hidden>
+        <div id="audit-summary" class="audit-summary"></div>
+
+        <div id="audit-suggest-block" hidden>
+          <div class="audit-block-head">
+            <h3>🟢 缺少直达票价但可达 —— 建议补录</h3>
+            <button class="btn btn-ghost" id="btn-audit-copy-all" type="button">
+              📋 复制全部建议补录行
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table id="audit-suggest-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>建议票价(元)</th><th>跳数</th>
+                  <th>最低成本完整路径</th><th>受影响卡号（原始行号）</th><th>建议补录行</th><th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="audit-over-block" hidden>
+          <h3>🔴 直达票价高于间接路径 —— 建议下调</h3>
+          <div class="table-wrap">
+            <table id="audit-over-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>直达票价(元)</th><th>间接最低(元)</th><th>差额(元)</th>
+                  <th>间接完整路径</th><th>受影响卡号（原始行号）</th><th>建议改价行</th><th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="audit-missing-block" class="errors-panel" hidden>
+          <h3>🟠 不可达分区对 —— 保留 MISSING_FARE</h3>
+          <ul id="audit-missing-list"></ul>
+        </div>
+      </div>
+    </section>
+
     <!-- 核验结果 -->
     <section class="card" id="sec-result">
-      <h2>7. 核验结果</h2>
+      <h2>8. 核验结果</h2>
       <div class="row-actions">
         <button class="btn btn-primary big" id="btn-verify" type="button">▶ 运行核验</button>
         <span id="verify-status" class="status"></span>
